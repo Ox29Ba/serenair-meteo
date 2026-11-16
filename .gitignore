@@ -1,0 +1,6 @@
+.venv/
+public/
+public.tmp/
+run.log
+__pycache__/
+.DS_Store

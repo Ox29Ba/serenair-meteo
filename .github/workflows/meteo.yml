@@ -1,0 +1,76 @@
+# Lit le dernier cycle du modèle GFS de la NOAA et publie les tuiles sur GitHub Pages.
+# Passe toutes les 3 heures (GitHub retarde souvent les tâches planifiées) et ne fait rien si le dernier cycle est
+# déjà en ligne : en pratique 4 publications par jour.
+name: meteo
+on:
+  schedule:
+    - cron: "20 2,5,8,11,14,17,20,23 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: meteo
+  cancel-in-progress: false
+
+jobs:
+  tuiles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      a_jour: ${{ steps.quoi.outputs.a_jour }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - id: quoi
+        name: Le dernier cycle est-il déjà en ligne ?
+        run: python meteo.py --quoi "https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}" | tee -a "$GITHUB_OUTPUT"
+      - name: Lire le modèle et écrire les tuiles
+        if: steps.quoi.outputs.a_jour != 'true'
+        run: python meteo.py --out public
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.quoi.outputs.a_jour != 'true'
+        with:
+          path: public
+      - name: Noter le cycle publié (garde aussi la tâche planifiée active)
+        if: steps.quoi.outputs.a_jour != 'true'
+        run: |
+          cp public/index.json etat.json
+          git config user.name "serenair-meteo"
+          git config user.email "serenair-meteo@users.noreply.github.com"
+          git add etat.json
+          git commit -q -m "cycle ${{ steps.quoi.outputs.cycle }}" || exit 0
+          git push -q
+  publier:
+    needs: tuiles
+    if: needs.tuiles.outputs.a_jour != 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    steps:
+      - id: pages
+        uses: actions/deploy-pages@v4
+  fraicheur:
+    # Échoue (et GitHub envoie un e-mail) si le cycle en ligne a plus de 18 heures.
+    needs: [tuiles, publier]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          mkdir -p en-ligne
+          curl -sf "https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}/index.json" -o en-ligne/index.json
+          python3 - <<'PY'
+          import json, datetime as dt, sys
+          c = json.load(open("en-ligne/index.json"))["cycle"]
+          age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.strptime(c, "%Y%m%d%H").replace(tzinfo=dt.timezone.utc)).total_seconds() / 3600
+          print(f"cycle {c}, {age:.1f} h")
+          sys.exit(1 if age > 18 else 0)
+          PY
